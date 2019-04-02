@@ -33,8 +33,13 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as serversocket:
     while 1:
         (clientsocket, address) = serversocket.accept()
 
+        # Receive request from client, and log
         request = read_request(clientsocket)
         logmessage(address, CVC_IP, request)
 
+        # Send request to server, wait for response, and log
         response = server_sendrecv(request)
         logmessage(CVC_IP, address, response)
+
+        # Send server response to client
+        send_response(clientsocket, response)
