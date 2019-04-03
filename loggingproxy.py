@@ -1,52 +1,54 @@
+import configparser
 import socket
+import _thread
 
-LOGFILE = 'logger.txt'
-CVC_IP = '127.0.0.1'
-CVC_PORT = 5555
-# PROXY_IP: normaal socket.gethostname() om te connecteren vanbuitenaf, localhost(127.0.0.1) om te testen:
-PROXY_IP = '127.0.0.1'
-PROXY_PORT = 1234
+lck = _thread.allocate_lock()
 
-def logmessage(fromip, toip, message):
-    with open(LOGFILE, "a+") as writefile:
-        writefile.write(f'{fromip} -> {toip}: {message}\n')
+config = configparser.ConfigParser()
+config.read("./proxyconfig.ini")
+servers = config["cvc_servers"]
+logging_conf = config["logging"]
 
+connections = {}
+for key, ip_port in servers.items():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        ip, port = ip_port.split(":")
+        sock.connect((ip, int(port)))
+        connections[key] = sock
+    except:
+        print(f"Could not connect to {ip_port}")
 
-def read_request(clientsocket):
-    return clientsocket.recv(4096).decode()
+proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+proxy_socket.bind((logging_conf["proxy_ip"], int(logging_conf["proxy_port"])))
+proxy_socket.listen(10)
 
-def send_response(clientsocket, message):
-    clientsocket.send(message.encode())
+def log(msg, prefix="MSG"):
+    global lck
+    lck.acquire(timeout=-1)
+    with open(logging_conf["logfile_path"], "a") as f:
+        f.write(f"[{prefix}] {msg}\n")
+    lck.release()
 
-
-def server_sendrecv(message):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as serversocket:
-        serversocket.connect((CVC_IP, CVC_PORT))
-        serversocket.sendall(message.encode())
-        response = serversocket.recv(4096).decode()
-
-        return response
-
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as serversocket:
-    serversocket.bind((PROXY_IP, PROXY_PORT))
-    serversocket.listen(5)
-    while 1:
-        try:
-            (clientsocket, address) = serversocket.accept()
-
-            # Receive request from client, and log
-            request = read_request(clientsocket)
-            logmessage(address[0], CVC_IP, request)
-
-            # Send request to server, wait for response, and log
-            response = server_sendrecv(request)
-            logmessage(CVC_IP, address[0], response)
-
-            if response == 0:
-                raise socket.error('server socked closed')
-            # Send server response to client
-            send_response(clientsocket, response)
-        except socket.error:
-            logmessage('ERROR', 'ERROR', 'errorlog.txt')
-        finally:
-            clientsocket.close()
+def handle_connection(clientsocket, address):
+    buff = ""
+    while clientsocket:
+        data = clientsocket.recv(1).decode()
+        if data == "\n":
+            buff += "\n"
+            buff_split = buff.split(",", 1)
+            if len(buff_split) == 2 and buff_split[0] in connections:
+                connections[buff_split[0]].sendall(buff_split[1].encode())
+                log(f"Sending \"{buff_split[1][:-1]}\" from {address} to {buff_split[0]}")
+            else:
+                log(f"Got \"{buff[:-1]}\" from {address}, don't know what to do with that", prefix="ERR")
+            buff = ""
+        else:
+            buff += data
+try:
+    while True:
+        _thread.start_new_thread(handle_connection, proxy_socket.accept())
+finally:
+    proxy_socket.close()
+    for sock in connections.values():
+        sock.close()
